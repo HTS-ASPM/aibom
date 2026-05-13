@@ -109,6 +109,15 @@ def _score_group(key: str, group: list[Finding]) -> AssetRisk:
         contributions.append(("blast_radius", 10))
         total += 10
 
+    # 8. KEV / VEX presence — exploit known in the wild
+    if any(f.category == "kev" for f in group):
+        # critical regardless of base severity — KEV means active exploitation
+        contributions.append(("kev_kicker", 30))
+        total += 30
+    elif any(f.category == "vex" for f in group):
+        contributions.append(("vex_kicker", 15))
+        total += 15
+
     score = min(100, total)
     return AssetRisk(
         asset_key=key,
