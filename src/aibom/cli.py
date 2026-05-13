@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import sys
@@ -9,8 +10,16 @@ from aibom.connectors import scan_aws_account, scan_azure_subscription, scan_gcp
 from aibom.policy import load_policy_file
 from aibom.reporters import render_cyclonedx, render_json, render_markdown, render_pretty_json, render_sarif
 from aibom.scanner import scan_path
+from aibom.signing import build_signature_manifest
 from aibom.store import diff_scans, get_scan, list_scans, save_scan
 from aibom.tuning import load_tuning_file
+from aibom.vex import (
+    cross_reference,
+    cross_reference_kev,
+    load_feed,
+    load_kev_feed,
+    merge_vex_into_bom,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -74,6 +83,47 @@ def build_parser() -> argparse.ArgumentParser:
     diff_parser.add_argument("left_scan_id", help="Older or baseline scan id")
     diff_parser.add_argument("right_scan_id", help="Newer scan id")
     diff_parser.add_argument("--db", help="Path to the scan history database")
+
+    vex_parser = subparsers.add_parser(
+        "vex", help="Cross-reference a CycloneDX BOM against the AiBOM VEX feed",
+    )
+    vex_parser.add_argument("bom_path", help="Path to a CycloneDX 1.6 JSON BOM")
+    vex_parser.add_argument("--feed", help="Override default VEX feed JSON path")
+    vex_parser.add_argument("--output", help="Write augmented BOM to this path (default: stdout)")
+    vex_parser.add_argument(
+        "--no-merge",
+        action="store_true",
+        help="Print only the VEX vulnerability entries (don't merge into the BOM)",
+    )
+
+    kev_parser = subparsers.add_parser(
+        "kev", help="Cross-reference a CycloneDX BOM's vulnerabilities against CISA KEV",
+    )
+    kev_parser.add_argument("bom_path", help="Path to a CycloneDX 1.6 JSON BOM")
+    kev_parser.add_argument("--kev-feed", help="Path to cached CISA KEV JSON (or set AIBOM_KEV_FEED)")
+    kev_parser.add_argument("--output", help="Write augmented BOM to this path (default: stdout)")
+    kev_parser.add_argument(
+        "--report-only",
+        action="store_true",
+        help="Print the list of KEV matches as JSON instead of the augmented BOM",
+    )
+
+    sign_parser = subparsers.add_parser(
+        "sign-bom", help="Build a Sigstore-friendly signing manifest for a BOM file",
+    )
+    sign_parser.add_argument("bom_path", help="Path to the BOM file to sign")
+    sign_parser.add_argument(
+        "--signer",
+        default="ci@hts.consulting",
+        help="Identity that will perform the signature (informational)",
+    )
+    sign_parser.add_argument("--key-ref", help="cosign key reference (env://, k8s://, file path)")
+    sign_parser.add_argument(
+        "--rekor-url",
+        default="https://rekor.sigstore.dev",
+        help="Rekor transparency log URL (informational)",
+    )
+    sign_parser.add_argument("--output", help="Write manifest JSON to this path (default: stdout)")
     return parser
 
 
@@ -122,7 +172,12 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv or argv[0] not in {"scan", "scan-github", "scan-huggingface", "scan-aws", "scan-azure", "scan-gcp", "history", "show-scan", "diff-scans", "-h", "--help"}:
+    known_commands = {
+        "scan", "scan-github", "scan-huggingface", "scan-aws", "scan-azure", "scan-gcp",
+        "history", "show-scan", "diff-scans", "vex", "kev", "sign-bom",
+        "-h", "--help",
+    }
+    if not argv or argv[0] not in known_commands:
         argv = ["scan", *argv]
     args = parser.parse_args(argv)
 
@@ -139,6 +194,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "diff-scans":
         print(render_pretty_json(diff_scans(args.left_scan_id, args.right_scan_id, db_path=args.db)))
         return 0
+
+    if args.command == "vex":
+        return _run_vex_command(args)
+
+    if args.command == "kev":
+        return _run_kev_command(args)
+
+    if args.command == "sign-bom":
+        return _run_sign_bom_command(args)
 
     policy = load_policy_file(args.policy)
     tuning = load_tuning_file(args.tuning)
@@ -205,3 +269,89 @@ def render_scan_result(result, output_format: str) -> str:
     if output_format == "cyclonedx":
         return render_cyclonedx(result)
     return render_json(result)
+
+
+# --------------------------------------------------------------------------- #
+# vex / kev / sign-bom command handlers (P7 + P8)
+# --------------------------------------------------------------------------- #
+
+def _run_vex_command(args: argparse.Namespace) -> int:
+    bom = _read_bom(args.bom_path)
+    feed = load_feed(Path(args.feed) if args.feed else None)
+    if args.no_merge:
+        from aibom.vex import emit_vex_for_bom
+        payload = {"vulnerabilities": emit_vex_for_bom(bom, feed=feed)}
+    else:
+        payload = merge_vex_into_bom(bom, feed=feed)
+    output = json.dumps(payload, indent=2)
+    if args.output:
+        Path(args.output).write_text(output, encoding="utf-8")
+    else:
+        print(output)
+    findings = cross_reference(bom, feed=feed)
+    print(render_pretty_json({"vex_matches": len(findings)}), file=sys.stderr)
+    return 0
+
+
+def _run_kev_command(args: argparse.Namespace) -> int:
+    bom = _read_bom(args.bom_path)
+    kev_path = Path(args.kev_feed) if args.kev_feed else None
+    kev_index = load_kev_feed(kev_path)
+    if not kev_index:
+        print(
+            "warning: no KEV catalog loaded (set AIBOM_KEV_FEED or pass --kev-feed)",
+            file=sys.stderr,
+        )
+    findings = cross_reference_kev(bom, kev_index)
+    if args.report_only:
+        report = {
+            "kev_matches": len(findings),
+            "matches": [
+                {
+                    "cve_id": f.metadata.get("cve_id"),
+                    "vendor": f.metadata.get("kev_vendor"),
+                    "product": f.metadata.get("kev_product"),
+                    "date_added": f.metadata.get("kev_date_added"),
+                    "known_ransomware": f.metadata.get("known_ransomware"),
+                    "bom_ref": f.metadata.get("bom_ref"),
+                    "summary": f.summary,
+                }
+                for f in findings
+            ],
+        }
+        output = json.dumps(report, indent=2)
+    else:
+        output = json.dumps(bom, indent=2)
+    if args.output:
+        Path(args.output).write_text(output, encoding="utf-8")
+    else:
+        print(output)
+    print(render_pretty_json({"kev_matches": len(findings)}), file=sys.stderr)
+    return 0
+
+
+def _run_sign_bom_command(args: argparse.Namespace) -> int:
+    bom_path = Path(args.bom_path)
+    if not bom_path.exists():
+        print(f"error: {bom_path} does not exist", file=sys.stderr)
+        return 2
+    manifest = build_signature_manifest(
+        bom_path,
+        intended_signer=args.signer,
+        rekor_log_url=args.rekor_url,
+        key_ref=args.key_ref,
+    )
+    output = json.dumps(manifest.to_dict(), indent=2)
+    if args.output:
+        Path(args.output).write_text(output, encoding="utf-8")
+    else:
+        print(output)
+    return 0
+
+
+def _read_bom(path: str) -> dict:
+    bom_path = Path(path)
+    if not bom_path.exists():
+        raise FileNotFoundError(f"BOM file not found: {bom_path}")
+    with bom_path.open(encoding="utf-8") as fh:
+        return json.load(fh)
