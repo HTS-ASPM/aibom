@@ -101,15 +101,34 @@ def invoke_cosign(
 ) -> dict[str, Any]:
     """Optional subprocess wrapper. Returns {"status": <int>, "stderr": ..., "stdout": ...}.
 
-    Raises FileNotFoundError if cosign isn't on PATH. No bytes are
-    captured from stdin; the user is expected to set up cosign auth
-    out-of-band (env vars, OIDC, file-backed key).
+    When a ``runner`` is provided (tests / wrappers) we hand it the full
+    argv with literal "cosign" as the binary name — no PATH lookup
+    happens. Without a runner we resolve cosign on PATH and shell out;
+    if cosign is absent we raise FileNotFoundError so the caller can
+    fall back to ``build_signature_manifest`` for an external signer.
     """
+    if runner is not None:
+        cmd = _build_cosign_cmd("cosign", bom_path, key_ref, output_signature, output_certificate)
+        return runner(cmd)
     cosign_path = shutil.which("cosign")
     if cosign_path is None:
-        raise FileNotFoundError("cosign not found on PATH — install Sigstore cosign or use build_signature_manifest only")
+        raise FileNotFoundError(
+            "cosign not found on PATH — install Sigstore cosign or use build_signature_manifest only"
+        )
+    cmd = _build_cosign_cmd(cosign_path, bom_path, key_ref, output_signature, output_certificate)
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)  # noqa: S603
+    return {"status": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}
+
+
+def _build_cosign_cmd(
+    binary: str,
+    bom_path: Path,
+    key_ref: str,
+    output_signature: Path,
+    output_certificate: Path | None,
+) -> list[str]:
     cmd = [
-        cosign_path, "sign-blob",
+        binary, "sign-blob",
         "--yes",
         "--key", key_ref,
         "--output-signature", str(output_signature),
@@ -117,10 +136,7 @@ def invoke_cosign(
     if output_certificate is not None:
         cmd.extend(["--output-certificate", str(output_certificate)])
     cmd.append(str(bom_path))
-    if runner is not None:
-        return runner(cmd)
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)  # noqa: S603
-    return {"status": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}
+    return cmd
 
 
 # --------------------------------------------------------------------------- #
