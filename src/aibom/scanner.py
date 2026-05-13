@@ -10,6 +10,7 @@ import tomllib
 
 from aibom.artifacts import scan_artifacts
 from aibom.datasets import scan_datasets
+from aibom.evidence import collect_github_actions, collect_mlflow_runs
 from aibom.iac import scan_helm_k8s, scan_terraform
 from aibom.models import Finding, MatchEvidence, ScanResult, ScanStats
 from aibom.owasp_mapping import annotate_finding_metadata
@@ -343,6 +344,8 @@ def scan_path(
         findings.extend(scan_artifacts(root))
         findings.extend(scan_terraform(root))
         findings.extend(scan_helm_k8s(root))
+        findings.extend(collect_github_actions(root))
+        findings.extend(collect_mlflow_runs(root))
 
     for finding in findings:
         annotate_finding_metadata(finding.rule_id, finding.metadata)
