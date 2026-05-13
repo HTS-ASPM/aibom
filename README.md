@@ -46,7 +46,7 @@ PYTHONPATH=src python3 -m aibom .
 - `json`: machine-readable findings
 - `markdown`: human-readable report
 - `sarif`: security-tooling compatible findings
-- `cyclonedx`: initial BOM-style export for downstream workflows
+- `cyclonedx`: CycloneDX 1.6 ML-BOM (machine-learning-model components with `modelCard`, `service` components for providers / vector DBs, `data` components for prompts and RAG flows). Consumable by Dependency-Track and any CDX 1.6-aware tool.
 
 ## Connectors
 

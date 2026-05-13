@@ -2,11 +2,19 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from pathlib import Path
-import uuid
 
 from aibom import __version__
+from aibom.cyclonedx import render_cyclonedx
 from aibom.models import ScanResult
+
+__all__ = [
+    "render_json",
+    "render_pretty_json",
+    "render_sarif",
+    "render_cyclonedx",
+    "render_markdown",
+    "stringify_value",
+]
 
 
 def render_json(result: ScanResult) -> str:
@@ -97,96 +105,6 @@ def render_sarif(result: ScanResult) -> str:
                 "results": results,
             }
         ],
-    }
-    return json.dumps(payload, indent=2)
-
-
-def render_cyclonedx(result: ScanResult) -> str:
-    serial = uuid.uuid5(uuid.NAMESPACE_URL, result.root)
-    components = []
-    seen_components: set[tuple[str, str, str]] = set()
-
-    type_map = {
-        "provider": "service",
-        "framework": "library",
-        "vector_db": "service",
-        "embedding": "library",
-        "model": "machine-learning-model",
-        "package": "library",
-        "prompt": "data",
-        "endpoint": "service",
-        "rag": "data",
-        "env_var": "data",
-        "data_flow": "data",
-    }
-
-    for finding in result.findings:
-        key = (finding.category, finding.name, finding.path)
-        if key in seen_components:
-            continue
-        seen_components.add(key)
-        component_ref = f"{finding.category}:{finding.name}:{finding.path}"
-        components.append(
-            {
-                "type": type_map.get(finding.category, "data"),
-                "bom-ref": component_ref,
-                "name": finding.name,
-                "version": "detected",
-                "scope": "required",
-                "description": finding.summary,
-                "properties": [
-                    {"name": "aibom:category", "value": finding.category},
-                    {"name": "aibom:rule_id", "value": finding.rule_id},
-                    {"name": "aibom:entity_type", "value": finding.entity_type},
-                    {"name": "aibom:source_kind", "value": finding.source_kind},
-                    {"name": "aibom:severity", "value": finding.severity},
-                    {"name": "aibom:confidence", "value": finding.confidence},
-                    {"name": "aibom:path", "value": finding.path},
-                ]
-                + [
-                    {"name": f"aibom:meta:{key}", "value": stringify_value(value)}
-                    for key, value in sorted(finding.metadata.items())
-                ],
-                "evidence": {
-                    "occurrences": [
-                        {
-                            "location": finding.path,
-                            "line": item.line,
-                        }
-                        for item in finding.evidence[:3]
-                    ]
-                },
-            }
-        )
-
-    payload = {
-        "bomFormat": "CycloneDX",
-        "specVersion": "1.7",
-        "serialNumber": f"urn:uuid:{serial}",
-        "version": 1,
-        "metadata": {
-            "timestamp": "1970-01-01T00:00:00Z",
-            "tools": {
-                "components": [
-                    {
-                        "type": "application",
-                        "name": "AiBOM",
-                        "version": __version__,
-                    }
-                ]
-            },
-            "component": {
-                "type": "application",
-                "name": Path(result.root).name or "scan-target",
-                "version": "unspecified",
-            },
-            "properties": [
-                {"name": "aibom:files_scanned", "value": str(result.stats.files_scanned)},
-                {"name": "aibom:files_skipped", "value": str(result.stats.files_skipped)},
-                {"name": "aibom:bytes_scanned", "value": str(result.stats.bytes_scanned)},
-            ],
-        },
-        "components": components,
     }
     return json.dumps(payload, indent=2)
 

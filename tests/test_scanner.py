@@ -49,12 +49,13 @@ class ScannerTestCase(unittest.TestCase):
         self.assertIn('"ruleId": "provider.openai.pattern"', sarif)
         self.assertIn('"uri": "app.py"', sarif)
 
-    def test_cyclonedx_export_contains_components(self) -> None:
+    def test_cyclonedx_export_is_cdx_1_6(self) -> None:
         result = scan_path(FIXTURES / "python_app")
         cyclonedx = render_cyclonedx(result)
 
         self.assertIn('"bomFormat": "CycloneDX"', cyclonedx)
-        self.assertIn('"specVersion": "1.7"', cyclonedx)
+        self.assertIn('"specVersion": "1.6"', cyclonedx)
+        # OpenAI provider appears in services (not components) under 1.6 ML-BOM mapping
         self.assertIn('"name": "OpenAI usage"', cyclonedx)
 
 
