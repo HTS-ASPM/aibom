@@ -8,6 +8,7 @@ re-shape findings, never alter them.
 """
 
 from aibom.compliance.annex_iv import generate_annex_iv_html
+from aibom.compliance.iso_42001 import generate_iso_42001_html
 from aibom.compliance.nist_rmf import generate_nist_rmf_html
 
-__all__ = ["generate_annex_iv_html", "generate_nist_rmf_html"]
+__all__ = ["generate_annex_iv_html", "generate_iso_42001_html", "generate_nist_rmf_html"]
