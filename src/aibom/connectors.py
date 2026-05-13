@@ -196,6 +196,93 @@ def build_huggingface_findings(model_id: str, metadata: dict) -> list[Finding]:
             )
         )
 
+    findings.extend(_huggingface_provenance_findings(model_id, metadata))
+
+    return findings
+
+
+def _huggingface_provenance_findings(model_id: str, metadata: dict) -> list[Finding]:
+    """P2: surface license, weight-format safety, and popularity signals as
+    provenance findings — feeds the CDX modelCard and the asset risk score.
+    """
+    findings: list[Finding] = []
+    card = metadata.get("cardData") or {}
+    license_value = (
+        metadata.get("license")
+        or card.get("license")
+        or card.get("license_name")
+        or ""
+    )
+    license_value = str(license_value).strip().lower() if license_value else ""
+
+    if not license_value or license_value in {"unknown", "other", "tba"}:
+        findings.append(
+            Finding(
+                finding_id=build_finding_id(model_id, "hf.license.unknown", [model_id]),
+                rule_id="hf.license.unknown",
+                category="provenance",
+                name="Hugging Face model has no declared license",
+                severity="high",
+                confidence="high",
+                path=model_id,
+                detector="huggingface-metadata",
+                entity_type="model",
+                source_kind="remote_metadata",
+                summary="Model card lacks a usable license — re-distribution and commercial use are unsafe to assume.",
+                evidence=[MatchEvidence(line=1, snippet=f"license={license_value or 'absent'}", match="license")],
+                metadata={"license": license_value},
+            )
+        )
+
+    siblings = metadata.get("siblings") or []
+    sibling_names = [
+        (s.get("rfilename") or "").lower() if isinstance(s, dict) else str(s).lower()
+        for s in siblings
+    ]
+    has_safetensors = any(name.endswith(".safetensors") for name in sibling_names)
+    has_unsafe = any(name.endswith((".bin", ".pt", ".pth", ".pkl")) for name in sibling_names)
+    if has_unsafe and not has_safetensors:
+        findings.append(
+            Finding(
+                finding_id=build_finding_id(model_id, "hf.safetensors.absent", [model_id]),
+                rule_id="hf.safetensors.absent",
+                category="provenance",
+                name="Hugging Face model has no safetensors weights",
+                severity="high",
+                confidence="high",
+                path=model_id,
+                detector="huggingface-metadata",
+                entity_type="model",
+                source_kind="remote_metadata",
+                summary="Only pickle-format weights present — loading executes arbitrary code. Prefer safetensors.",
+                evidence=[
+                    MatchEvidence(line=1, snippet=name, match=name)
+                    for name in sibling_names if name.endswith((".bin", ".pt", ".pth", ".pkl"))
+                ][:3],
+                metadata={"unsafe_weight_count": sum(1 for n in sibling_names if n.endswith((".bin", ".pt", ".pth", ".pkl")))},
+            )
+        )
+
+    downloads = metadata.get("downloads")
+    if isinstance(downloads, int) and downloads < 100:
+        findings.append(
+            Finding(
+                finding_id=build_finding_id(model_id, "hf.popularity.low", [model_id]),
+                rule_id="hf.popularity.low",
+                category="provenance",
+                name="Hugging Face model has very low download count",
+                severity="medium",
+                confidence="medium",
+                path=model_id,
+                detector="huggingface-metadata",
+                entity_type="model",
+                source_kind="remote_metadata",
+                summary=f"Only {downloads} downloads — supply-chain reputation is unestablished.",
+                evidence=[MatchEvidence(line=1, snippet=f"downloads={downloads}", match=str(downloads))],
+                metadata={"downloads": downloads},
+            )
+        )
+
     return findings
 
 

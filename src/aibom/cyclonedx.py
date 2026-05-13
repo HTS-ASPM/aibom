@@ -73,6 +73,7 @@ _CATEGORY_ROUTING = {
     "package": "library",
     "rag": "data",
     "prompt": "data",
+    "prompt_risk": "data",
     "data_flow": "data",
     "dataset": "data",
 }
@@ -360,7 +361,14 @@ def _component_properties(finding: Finding) -> list[dict[str, str]]:
         {"name": "aibom:confidence", "value": finding.confidence},
         {"name": "aibom:path", "value": finding.path},
     ]
+    for framework_key in ("owasp_llm", "owasp_mcp", "mitre_atlas", "nist_ai_rmf"):
+        values = finding.metadata.get(framework_key)
+        if isinstance(values, list):
+            for v in values:
+                props.append({"name": f"aibom:framework:{framework_key}", "value": str(v)})
     for key, value in sorted(finding.metadata.items()):
+        if key in {"owasp_llm", "owasp_mcp", "mitre_atlas", "nist_ai_rmf"}:
+            continue  # surfaced as framework properties above
         props.append({"name": f"aibom:meta:{key}", "value": _stringify(value)})
     return props
 

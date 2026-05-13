@@ -11,7 +11,9 @@ import tomllib
 from aibom.artifacts import scan_artifacts
 from aibom.datasets import scan_datasets
 from aibom.models import Finding, MatchEvidence, ScanResult, ScanStats
+from aibom.owasp_mapping import annotate_finding_metadata
 from aibom.policy import apply_policy
+from aibom.prompt_risk import scan_prompt_risks
 from aibom.tuning import apply_tuning, merge_exclude_patterns
 
 
@@ -334,9 +336,13 @@ def scan_path(
         findings.extend(scan_data_flow(rel_path, lines))
         findings.extend(scan_public_ai_endpoint(rel_path, lines))
         findings.extend(scan_datasets(rel_path, lines, source_kind))
+        findings.extend(scan_prompt_risks(rel_path, lines, source_kind))
 
     if root.exists():
         findings.extend(scan_artifacts(root))
+
+    for finding in findings:
+        annotate_finding_metadata(finding.rule_id, finding.metadata)
 
     findings = apply_tuning(dedupe_findings(findings), tuning or {})
     findings = apply_policy(findings, policy or {})
