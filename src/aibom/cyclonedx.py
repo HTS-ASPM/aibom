@@ -67,12 +67,14 @@ _CATEGORY_ROUTING = {
     "vector_db": "service",
     "endpoint": "service",
     "model": "ml_model",
+    "model_artifact": "ml_model",
     "framework": "library",
     "embedding": "library",
     "package": "library",
     "rag": "data",
     "prompt": "data",
     "data_flow": "data",
+    "dataset": "data",
 }
 
 _SUPPRESSED_CATEGORIES = {"env_var", "secret"}
@@ -204,6 +206,23 @@ def _build_ml_model(category: str, name: str, findings: list[Finding]) -> dict[s
         "evidence": _evidence(findings),
         "properties": _component_properties(primary),
     }
+    # Artifact-inspector findings carry a real file hash — surface it as
+    # the canonical CDX evidence.identity record + component.hashes.
+    sha = primary.metadata.get("sha256")
+    if isinstance(sha, str) and sha:
+        component["hashes"] = [{"alg": "SHA-256", "content": sha}]
+        component["evidence"].setdefault("identity", []).append(
+            {
+                "field": "hash",
+                "confidence": 1.0,
+                "methods": [
+                    {"technique": "filename", "confidence": 1.0, "value": primary.path}
+                ],
+            }
+        )
+        fmt = primary.metadata.get("format")
+        if isinstance(fmt, str):
+            component["properties"].append({"name": "aibom:artifact_format", "value": fmt})
     if provider:
         component["supplier"] = {"name": provider}
         component["publisher"] = provider
@@ -261,7 +280,9 @@ def _build_data_component(category: str, name: str, findings: list[Finding]) -> 
         "rag": "retrieval-context",
         "prompt": "prompt-template",
         "data_flow": "business-data",
+        "dataset": _dataset_classification(primary),
     }.get(category, "ai-related")
+    data_type = "dataset" if category == "dataset" else "configuration"
     return {
         "type": COMPONENT_TYPES["data"],
         "bom-ref": _bom_ref(category, name),
@@ -269,7 +290,7 @@ def _build_data_component(category: str, name: str, findings: list[Finding]) -> 
         "description": primary.summary,
         "data": [
             {
-                "type": "configuration",
+                "type": data_type,
                 "name": name,
                 "classification": classification,
             }
@@ -277,6 +298,21 @@ def _build_data_component(category: str, name: str, findings: list[Finding]) -> 
         "evidence": _evidence(findings),
         "properties": _component_properties(primary),
     }
+
+
+def _dataset_classification(finding: Finding) -> str:
+    source = finding.metadata.get("source") or ""
+    if source in {"aws-s3", "gcp-gcs", "azure-blob"}:
+        return "object-store"
+    if source == "warehouse":
+        return "warehouse"
+    if source == "lakehouse":
+        return "lakehouse"
+    if source == "huggingface-datasets":
+        return "huggingface-hub"
+    if source in {"dvc", "lakefs"}:
+        return "versioned"
+    return "tabular"
 
 
 # --------------------------------------------------------------------------- #
