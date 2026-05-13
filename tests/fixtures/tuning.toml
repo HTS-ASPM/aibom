@@ -1,0 +1,13 @@
+exclude_patterns = ["generated/*"]
+suppress_rule_ids = ["package.ai_sdk.pattern"]
+baseline_ignore_rule_ids = ["prompt.pattern"]
+
+[severity_overrides]
+"endpoint.public_ai.same_file" = "medium"
+
+[confidence_overrides]
+"data_flow.same_file" = "medium"
+
+[[path_suppressions]]
+rule_id = "provider.openai.pattern"
+path = "app.py"

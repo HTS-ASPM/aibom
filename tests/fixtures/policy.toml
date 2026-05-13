@@ -1,0 +1,5 @@
+approved_providers = ["openai"]
+approved_models = ["gpt-4o"]
+
+[severity_overrides]
+"prompt.pattern" = "low"

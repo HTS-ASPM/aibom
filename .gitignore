@@ -1,0 +1,51 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+wheels/
+share/python-wheels/
+
+# Virtual environments
+.venv/
+.venv-*/
+venv/
+env/
+ENV/
+
+# Local AiBOM state
+.aibom/
+*.db
+*.sqlite
+*.sqlite3
+
+# Reports / scan outputs
+report.md
+report.sarif
+bom.cdx.json
+*.aibom.json
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Tooling
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Local Claude config (per-machine)
+.claude/settings.local.json
