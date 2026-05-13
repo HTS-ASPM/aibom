@@ -22,7 +22,7 @@ Output is a small JSON shape designed to be diffable across scans.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from aibom.models import Finding, ScanResult
@@ -120,6 +120,72 @@ def build_asset_graph(result: ScanResult, *, include_findings: bool = True) -> d
 
 def render_asset_graph_json(result: ScanResult, *, include_findings: bool = True) -> str:
     return json.dumps(build_asset_graph(result, include_findings=include_findings), indent=2)
+
+
+# --------------------------------------------------------------------------- #
+# Graph diff (P7)
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class AssetGraphDiff:
+    nodes_added: list[dict[str, Any]] = field(default_factory=list)
+    nodes_removed: list[dict[str, Any]] = field(default_factory=list)
+    nodes_changed: list[dict[str, Any]] = field(default_factory=list)
+    edges_added: list[dict[str, Any]] = field(default_factory=list)
+    edges_removed: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "summary": {
+                "nodes_added": len(self.nodes_added),
+                "nodes_removed": len(self.nodes_removed),
+                "nodes_changed": len(self.nodes_changed),
+                "edges_added": len(self.edges_added),
+                "edges_removed": len(self.edges_removed),
+            },
+            "nodes_added": self.nodes_added,
+            "nodes_removed": self.nodes_removed,
+            "nodes_changed": self.nodes_changed,
+            "edges_added": self.edges_added,
+            "edges_removed": self.edges_removed,
+        }
+
+
+def diff_asset_graphs(older: dict[str, Any], newer: dict[str, Any]) -> AssetGraphDiff:
+    """Compute the difference between two asset-graph dicts (build_asset_graph output)."""
+    old_nodes = {n["id"]: n for n in (older.get("nodes") or [])}
+    new_nodes = {n["id"]: n for n in (newer.get("nodes") or [])}
+
+    diff = AssetGraphDiff()
+    for nid, node in new_nodes.items():
+        if nid not in old_nodes:
+            diff.nodes_added.append(node)
+        elif _node_changed(old_nodes[nid], node):
+            diff.nodes_changed.append({"id": nid, "before": old_nodes[nid], "after": node})
+    for nid, node in old_nodes.items():
+        if nid not in new_nodes:
+            diff.nodes_removed.append(node)
+
+    old_edges = {(e["source"], e["target"], e["kind"]): e for e in (older.get("edges") or [])}
+    new_edges = {(e["source"], e["target"], e["kind"]): e for e in (newer.get("edges") or [])}
+    for key, edge in new_edges.items():
+        if key not in old_edges:
+            diff.edges_added.append(edge)
+    for key, edge in old_edges.items():
+        if key not in new_edges:
+            diff.edges_removed.append(edge)
+
+    return diff
+
+
+def render_asset_graph_diff_json(older: dict[str, Any], newer: dict[str, Any]) -> str:
+    return json.dumps(diff_asset_graphs(older, newer).to_dict(), indent=2)
+
+
+def _node_changed(old: dict[str, Any], new: dict[str, Any]) -> bool:
+    """A node 'changed' when its properties differ — labels and ids are
+    excluded from the comparison so a label tweak alone doesn't churn."""
+    return (old.get("properties") or {}) != (new.get("properties") or {})
 
 
 # --------------------------------------------------------------------------- #
