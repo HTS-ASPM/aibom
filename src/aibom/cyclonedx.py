@@ -76,6 +76,8 @@ _CATEGORY_ROUTING = {
     "prompt_risk": "data",
     "data_flow": "data",
     "dataset": "data",
+    "formulation": "data",
+    "provenance": "data",
 }
 
 _SUPPRESSED_CATEGORIES = {"env_var", "secret"}
@@ -352,6 +354,8 @@ def _evidence(findings: list[Finding]) -> dict[str, Any]:
 
 
 def _component_properties(finding: Finding) -> list[dict[str, str]]:
+    from aibom.risk import score_for_finding
+
     props: list[dict[str, str]] = [
         {"name": "aibom:category", "value": finding.category},
         {"name": "aibom:rule_id", "value": finding.rule_id},
@@ -360,6 +364,7 @@ def _component_properties(finding: Finding) -> list[dict[str, str]]:
         {"name": "aibom:severity", "value": finding.severity},
         {"name": "aibom:confidence", "value": finding.confidence},
         {"name": "aibom:path", "value": finding.path},
+        {"name": "aibom:risk_score", "value": str(score_for_finding(finding))},
     ]
     for framework_key in ("owasp_llm", "owasp_mcp", "mitre_atlas", "nist_ai_rmf"):
         values = finding.metadata.get(framework_key)
