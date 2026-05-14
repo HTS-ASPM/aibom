@@ -6,9 +6,25 @@ import os
 from pathlib import Path
 import sys
 
+from aibom.asset_graph import (
+    build_asset_graph,
+    diff_asset_graphs,
+    render_asset_graph_diff_json,
+    render_asset_graph_json,
+)
+from aibom.compliance import (
+    generate_annex_iv_html,
+    generate_iso_42001_html,
+    generate_nist_rmf_html,
+)
 from aibom.connectors import scan_aws_account, scan_azure_subscription, scan_gcp_project, scan_github_repo, scan_huggingface_model
+from aibom.cyclonedx import build_bom
+from aibom.dashboard import generate_executive_dashboard_html
+from aibom.diff import diff_scans as diff_scan_results, render_diff_html, render_diff_json
+from aibom.models import ScanResult
 from aibom.policy import load_policy_file
 from aibom.reporters import render_cyclonedx, render_json, render_markdown, render_pretty_json, render_sarif
+from aibom.sbom_unified import merge_sbom_aibom
 from aibom.scanner import scan_path
 from aibom.signing import build_signature_manifest
 from aibom.store import diff_scans, get_scan, list_scans, save_scan
@@ -124,6 +140,73 @@ def build_parser() -> argparse.ArgumentParser:
         help="Rekor transparency log URL (informational)",
     )
     sign_parser.add_argument("--output", help="Write manifest JSON to this path (default: stdout)")
+
+    report_parser = subparsers.add_parser(
+        "report", help="Render a compliance HTML report for a scan target",
+    )
+    report_parser.add_argument(
+        "--type",
+        choices=("annex-iv", "nist-rmf", "iso-42001"),
+        required=True,
+        help="Compliance framework",
+    )
+    report_parser.add_argument("target", nargs="?", default=".", help="Path to scan (default: cwd)")
+    report_parser.add_argument("--output", help="Write HTML to this path (default: stdout)")
+    report_parser.add_argument("--policy", help="Optional policy file")
+    report_parser.add_argument("--tuning", help="Optional tuning file")
+
+    dash_parser = subparsers.add_parser(
+        "dashboard", help="Render the AiBOM executive dashboard HTML for a scan target",
+    )
+    dash_parser.add_argument("target", nargs="?", default=".", help="Path to scan (default: cwd)")
+    dash_parser.add_argument("--output", required=True, help="Write HTML to this path")
+    dash_parser.add_argument("--policy", help="Optional policy file")
+    dash_parser.add_argument("--tuning", help="Optional tuning file")
+
+    unified_parser = subparsers.add_parser(
+        "unified-bom",
+        help="Merge a CycloneDX SBOM (HTS-ASPM SBOM module / Trivy / Syft / cdxgen) with the AiBOM",
+    )
+    unified_parser.add_argument("sbom_path", help="Path to a CycloneDX 1.6 JSON SBOM")
+    unified_parser.add_argument("target", nargs="?", default=".", help="Path to scan with AiBOM (default: cwd)")
+    unified_parser.add_argument("--output", help="Write merged BOM to this path (default: stdout)")
+    unified_parser.add_argument("--policy", help="Optional policy file")
+    unified_parser.add_argument("--tuning", help="Optional tuning file")
+
+    asset_parser = subparsers.add_parser(
+        "asset-graph", help="Emit the AiBOM asset graph as JSON",
+    )
+    asset_parser.add_argument("target", nargs="?", default=".", help="Path to scan (default: cwd)")
+    asset_parser.add_argument("--output", help="Write JSON to this path (default: stdout)")
+    asset_parser.add_argument(
+        "--no-findings",
+        action="store_true",
+        help="Skip the per-finding nodes (smaller graph for dashboard rendering)",
+    )
+
+    asset_diff_parser = subparsers.add_parser(
+        "asset-graph-diff", help="Diff two asset-graph JSON files",
+    )
+    asset_diff_parser.add_argument("older_path", help="Path to the older asset-graph JSON")
+    asset_diff_parser.add_argument("newer_path", help="Path to the newer asset-graph JSON")
+    asset_diff_parser.add_argument("--output", help="Write diff JSON to this path (default: stdout)")
+
+    scan_diff_parser = subparsers.add_parser(
+        "scan-diff",
+        help="Diff two raw AiBOM scan JSON files (richer than `diff-scans`, no DB required)",
+    )
+    scan_diff_parser.add_argument("older_path", help="Path to the older scan JSON")
+    scan_diff_parser.add_argument("newer_path", help="Path to the newer scan JSON")
+    scan_diff_parser.add_argument(
+        "--format",
+        choices=("json", "html"),
+        default="json",
+        help="Output format",
+    )
+    scan_diff_parser.add_argument("--output", help="Write diff to this path (default: stdout)")
+    scan_diff_parser.add_argument("--older-label", default="older", help="Label for the older scan in HTML")
+    scan_diff_parser.add_argument("--newer-label", default="newer", help="Label for the newer scan in HTML")
+
     return parser
 
 
@@ -175,6 +258,8 @@ def main(argv: list[str] | None = None) -> int:
     known_commands = {
         "scan", "scan-github", "scan-huggingface", "scan-aws", "scan-azure", "scan-gcp",
         "history", "show-scan", "diff-scans", "vex", "kev", "sign-bom",
+        "report", "dashboard", "unified-bom",
+        "asset-graph", "asset-graph-diff", "scan-diff",
         "-h", "--help",
     }
     if not argv or argv[0] not in known_commands:
@@ -203,6 +288,24 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "sign-bom":
         return _run_sign_bom_command(args)
+
+    if args.command == "report":
+        return _run_report_command(args)
+
+    if args.command == "dashboard":
+        return _run_dashboard_command(args)
+
+    if args.command == "unified-bom":
+        return _run_unified_bom_command(args)
+
+    if args.command == "asset-graph":
+        return _run_asset_graph_command(args)
+
+    if args.command == "asset-graph-diff":
+        return _run_asset_graph_diff_command(args)
+
+    if args.command == "scan-diff":
+        return _run_scan_diff_command(args)
 
     policy = load_policy_file(args.policy)
     tuning = load_tuning_file(args.tuning)
@@ -355,3 +458,121 @@ def _read_bom(path: str) -> dict:
         raise FileNotFoundError(f"BOM file not found: {bom_path}")
     with bom_path.open(encoding="utf-8") as fh:
         return json.load(fh)
+
+
+# --------------------------------------------------------------------------- #
+# report / dashboard / unified-bom / asset-graph / scan-diff handlers (P9)
+# --------------------------------------------------------------------------- #
+
+_REPORT_GENERATORS = {
+    "annex-iv": generate_annex_iv_html,
+    "nist-rmf": generate_nist_rmf_html,
+    "iso-42001": generate_iso_42001_html,
+}
+
+
+def _scan_target_for_report(args: argparse.Namespace) -> ScanResult:
+    """Run scan_path for the report / dashboard / asset-graph subcommands."""
+    target = Path(args.target).resolve()
+    if not target.exists():
+        raise FileNotFoundError(f"target does not exist: {target}")
+    policy = load_policy_file(getattr(args, "policy", None))
+    tuning = load_tuning_file(getattr(args, "tuning", None))
+    return scan_path(target, policy=policy, tuning=tuning)
+
+
+def _emit(content: str, output: str | None) -> None:
+    if output:
+        Path(output).write_text(content, encoding="utf-8")
+    else:
+        print(content)
+
+
+def _run_report_command(args: argparse.Namespace) -> int:
+    try:
+        result = _scan_target_for_report(args)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    generator = _REPORT_GENERATORS[args.type]
+    _emit(generator(result), args.output)
+    return 0
+
+
+def _run_dashboard_command(args: argparse.Namespace) -> int:
+    try:
+        result = _scan_target_for_report(args)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    _emit(generate_executive_dashboard_html(result), args.output)
+    return 0
+
+
+def _run_unified_bom_command(args: argparse.Namespace) -> int:
+    sbom_path = Path(args.sbom_path)
+    if not sbom_path.exists():
+        print(f"error: SBOM file not found: {sbom_path}", file=sys.stderr)
+        return 2
+    try:
+        sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        print(f"error: SBOM is not valid JSON: {exc}", file=sys.stderr)
+        return 2
+    try:
+        result = _scan_target_for_report(args)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    aibom = build_bom(result)
+    merged = merge_sbom_aibom(sbom, aibom)
+    _emit(json.dumps(merged, indent=2), args.output)
+    print(
+        render_pretty_json({
+            "sbom_components": len(sbom.get("components", []) or []),
+            "aibom_components": len(aibom.get("components", []) or []),
+            "merged_components": len(merged.get("components", []) or []),
+            "merged_services": len(merged.get("services", []) or []),
+        }),
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _run_asset_graph_command(args: argparse.Namespace) -> int:
+    try:
+        result = _scan_target_for_report(args)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    rendered = render_asset_graph_json(result, include_findings=not args.no_findings)
+    _emit(rendered, args.output)
+    return 0
+
+
+def _run_asset_graph_diff_command(args: argparse.Namespace) -> int:
+    older = _read_bom(args.older_path)
+    newer = _read_bom(args.newer_path)
+    _emit(render_asset_graph_diff_json(older, newer), args.output)
+    return 0
+
+
+def _run_scan_diff_command(args: argparse.Namespace) -> int:
+    older = _read_scan_result(args.older_path)
+    newer = _read_scan_result(args.newer_path)
+    diff = diff_scan_results(older, newer)
+    if args.format == "html":
+        rendered = render_diff_html(diff, older_label=args.older_label, newer_label=args.newer_label)
+    else:
+        rendered = render_diff_json(diff)
+    _emit(rendered, args.output)
+    return 0
+
+
+def _read_scan_result(path: str) -> ScanResult:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"scan file not found: {p}")
+    with p.open(encoding="utf-8") as fh:
+        payload = json.load(fh)
+    return ScanResult.from_dict(payload)
