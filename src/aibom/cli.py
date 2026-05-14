@@ -252,13 +252,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Manage the per-file fingerprint cache used by --use-cache scans",
     )
     cache_sub = cache_parser.add_subparsers(dest="cache_action", required=True)
-    cache_sub.add_parser("stats", help="Show row count + age range for the current scanner version")
-    cache_sub.add_parser("clear", help="Delete every cached entry")
-    cache_sub.add_parser("prune", help="Drop cached entries from older scanner versions")
-    cache_parser.add_argument(
-        "--cache-db",
-        help=f"SQLite cache file (default: {default_cache_path()})",
-    )
+    for action_name, action_help in (
+        ("stats", "Show row count + age range for the current scanner version"),
+        ("clear", "Delete every cached entry"),
+        ("prune", "Drop cached entries from older scanner versions"),
+    ):
+        sub = cache_sub.add_parser(action_name, help=action_help)
+        sub.add_argument(
+            "--cache-db",
+            help=f"SQLite cache file (default: {default_cache_path()})",
+        )
 
     return parser
 
