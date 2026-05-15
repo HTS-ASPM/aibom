@@ -9,6 +9,12 @@ import re
 import tomllib
 
 from aibom.artifacts import scan_artifacts
+from aibom.cache import (
+    CacheStats,
+    fingerprint_text,
+    lookup as cache_lookup,
+    store as cache_store,
+)
 from aibom.datasets import scan_datasets
 from aibom.evidence import collect_github_actions, collect_mlflow_runs
 from aibom.iac import scan_helm_k8s, scan_terraform
@@ -305,8 +311,14 @@ def scan_path(
     exclude_patterns: list[str] | None = None,
     policy: dict | None = None,
     tuning: dict | None = None,
+    cache_conn=None,
 ) -> ScanResult:
+    """Scan a path. When ``cache_conn`` is provided, per-file findings are
+    looked up by content sha256 + scanner version; misses are populated
+    after running the per-file detectors. The tree-level layers (binary
+    artifacts, IaC, CI evidence) are not cached — they're cheap."""
     stats = ScanStats()
+    cache_stats = CacheStats()
     findings: list[Finding] = []
     exclude_patterns = merge_exclude_patterns(list(DEFAULT_EXCLUDE_PATTERNS) + (exclude_patterns or []), tuning or {})
 
@@ -331,14 +343,35 @@ def scan_path(
         stats.files_scanned += 1
         stats.bytes_scanned += size
         rel_path = str(path.relative_to(root))
-        lines = text.splitlines()
-        source_kind = classify_source_kind(rel_path)
-        findings.extend(scan_parsed_dependencies(rel_path, path, text))
-        findings.extend(scan_rules(rel_path, lines))
-        findings.extend(scan_data_flow(rel_path, lines))
-        findings.extend(scan_public_ai_endpoint(rel_path, lines))
-        findings.extend(scan_datasets(rel_path, lines, source_kind))
-        findings.extend(scan_prompt_risks(rel_path, lines, source_kind))
+        per_file_findings: list[Finding] | None = None
+        content_sha = fingerprint_text(text) if cache_conn is not None else None
+        if cache_conn is not None and content_sha is not None:
+            cached = cache_lookup(cache_conn, content_sha256=content_sha, rel_path=rel_path)
+            if cached is not None:
+                per_file_findings = cached
+                cache_stats = CacheStats(
+                    hits=cache_stats.hits + 1,
+                    misses=cache_stats.misses,
+                    inserted=cache_stats.inserted,
+                )
+        if per_file_findings is None:
+            lines = text.splitlines()
+            source_kind = classify_source_kind(rel_path)
+            per_file_findings = []
+            per_file_findings.extend(scan_parsed_dependencies(rel_path, path, text))
+            per_file_findings.extend(scan_rules(rel_path, lines))
+            per_file_findings.extend(scan_data_flow(rel_path, lines))
+            per_file_findings.extend(scan_public_ai_endpoint(rel_path, lines))
+            per_file_findings.extend(scan_datasets(rel_path, lines, source_kind))
+            per_file_findings.extend(scan_prompt_risks(rel_path, lines, source_kind))
+            if cache_conn is not None and content_sha is not None:
+                cache_store(cache_conn, content_sha256=content_sha, rel_path=rel_path, findings=per_file_findings)
+                cache_stats = CacheStats(
+                    hits=cache_stats.hits,
+                    misses=cache_stats.misses + 1,
+                    inserted=cache_stats.inserted + 1,
+                )
+        findings.extend(per_file_findings)
 
     if root.exists():
         findings.extend(scan_artifacts(root))

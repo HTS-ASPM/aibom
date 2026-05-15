@@ -20,6 +20,14 @@ from aibom.compliance import (
 from aibom.connectors import scan_aws_account, scan_azure_subscription, scan_gcp_project, scan_github_repo, scan_huggingface_model
 from aibom.cyclonedx import build_bom
 from aibom.dashboard import generate_executive_dashboard_html
+from aibom.cache import (
+    clear_all as cache_clear_all,
+    default_cache_path,
+    open_cache,
+    prune_other_versions as cache_prune_other_versions,
+    stats_for_version as cache_stats_for_version,
+)
+from aibom.code_hosts import scan_bitbucket_repo, scan_gitlab_repo
 from aibom.diff import diff_scans as diff_scan_results, render_diff_html, render_diff_json
 from aibom.models import ScanResult
 from aibom.policy import load_policy_file
@@ -53,7 +61,39 @@ def build_parser() -> argparse.ArgumentParser:
     github_parser.add_argument(
         "--github-token-env",
         default="GITHUB_TOKEN",
-        help="Environment variable containing a GitHub token",
+        help=(
+            "Environment variable containing a GitHub token (PAT or GitHub App "
+            "installation token, e.g. GITHUB_APP_INSTALLATION_TOKEN)"
+        ),
+    )
+
+    gitlab_parser = subparsers.add_parser("scan-gitlab", help="Scan a GitLab repository archive")
+    add_common_arguments(gitlab_parser)
+    gitlab_parser.add_argument(
+        "project",
+        help="GitLab project — numeric id OR url-encoded full path (group%2Fproject)",
+    )
+    gitlab_parser.add_argument("--ref", default="main", help="Git ref, branch, or tag")
+    gitlab_parser.add_argument("--gitlab-base-url", default="https://gitlab.com", help="Self-hosted GitLab base URL")
+    gitlab_parser.add_argument(
+        "--gitlab-token-env",
+        default="GITLAB_TOKEN",
+        help="Env var containing a GitLab personal / project access token",
+    )
+
+    bitbucket_parser = subparsers.add_parser("scan-bitbucket", help="Scan a Bitbucket Cloud repository archive")
+    add_common_arguments(bitbucket_parser)
+    bitbucket_parser.add_argument("repo", help="Bitbucket repo in workspace/repo form")
+    bitbucket_parser.add_argument("--ref", default="main", help="Git ref, branch, or tag")
+    bitbucket_parser.add_argument(
+        "--bitbucket-base-url",
+        default="https://api.bitbucket.org",
+        help="Bitbucket Server / Data Center base URL (defaults to Cloud)",
+    )
+    bitbucket_parser.add_argument(
+        "--bitbucket-token-env",
+        default="BITBUCKET_TOKEN",
+        help="Env var containing a Bitbucket access token / app password",
     )
 
     hf_parser = subparsers.add_parser("scan-huggingface", help="Scan a Hugging Face model metadata record")
@@ -207,6 +247,22 @@ def build_parser() -> argparse.ArgumentParser:
     scan_diff_parser.add_argument("--older-label", default="older", help="Label for the older scan in HTML")
     scan_diff_parser.add_argument("--newer-label", default="newer", help="Label for the newer scan in HTML")
 
+    cache_parser = subparsers.add_parser(
+        "cache",
+        help="Manage the per-file fingerprint cache used by --use-cache scans",
+    )
+    cache_sub = cache_parser.add_subparsers(dest="cache_action", required=True)
+    for action_name, action_help in (
+        ("stats", "Show row count + age range for the current scanner version"),
+        ("clear", "Delete every cached entry"),
+        ("prune", "Drop cached entries from older scanner versions"),
+    ):
+        sub = cache_sub.add_parser(action_name, help=action_help)
+        sub.add_argument(
+            "--cache-db",
+            help=f"SQLite cache file (default: {default_cache_path()})",
+        )
+
     return parser
 
 
@@ -250,16 +306,27 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         "--db",
         help="Path to the scan history database",
     )
+    parser.add_argument(
+        "--use-cache",
+        action="store_true",
+        help="Look up per-file findings by content fingerprint to skip unchanged files",
+    )
+    parser.add_argument(
+        "--cache-db",
+        help=f"SQLite cache file (default: {default_cache_path()})",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     argv = list(sys.argv[1:] if argv is None else argv)
     known_commands = {
-        "scan", "scan-github", "scan-huggingface", "scan-aws", "scan-azure", "scan-gcp",
+        "scan", "scan-github", "scan-gitlab", "scan-bitbucket",
+        "scan-huggingface", "scan-aws", "scan-azure", "scan-gcp",
         "history", "show-scan", "diff-scans", "vex", "kev", "sign-bom",
         "report", "dashboard", "unified-bom",
         "asset-graph", "asset-graph-diff", "scan-diff",
+        "cache",
         "-h", "--help",
     }
     if not argv or argv[0] not in known_commands:
@@ -307,8 +374,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "scan-diff":
         return _run_scan_diff_command(args)
 
+    if args.command == "cache":
+        return _run_cache_command(args)
+
     policy = load_policy_file(args.policy)
     tuning = load_tuning_file(args.tuning)
+    cache_conn = None
+    if getattr(args, "use_cache", False):
+        cache_path = Path(args.cache_db) if args.cache_db else None
+        cache_conn = open_cache(cache_path)
 
     if args.command == "scan-github":
         token = os.environ.get(args.github_token_env)
@@ -316,6 +390,30 @@ def main(argv: list[str] | None = None) -> int:
             args.repo,
             ref=args.ref,
             token=token,
+            max_file_size=args.max_file_size,
+            exclude_patterns=args.exclude,
+            policy=policy,
+            tuning=tuning,
+        )
+    elif args.command == "scan-gitlab":
+        token = os.environ.get(args.gitlab_token_env)
+        result = scan_gitlab_repo(
+            args.project,
+            ref=args.ref,
+            token=token,
+            base_url=args.gitlab_base_url,
+            max_file_size=args.max_file_size,
+            exclude_patterns=args.exclude,
+            policy=policy,
+            tuning=tuning,
+        )
+    elif args.command == "scan-bitbucket":
+        token = os.environ.get(args.bitbucket_token_env)
+        result = scan_bitbucket_repo(
+            args.repo,
+            ref=args.ref,
+            token=token,
+            base_url=args.bitbucket_base_url,
             max_file_size=args.max_file_size,
             exclude_patterns=args.exclude,
             policy=policy,
@@ -349,7 +447,14 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         target = Path(args.target).resolve()
-        result = scan_path(target, max_file_size=args.max_file_size, exclude_patterns=args.exclude, policy=policy, tuning=tuning)
+        result = scan_path(
+            target,
+            max_file_size=args.max_file_size,
+            exclude_patterns=args.exclude,
+            policy=policy,
+            tuning=tuning,
+            cache_conn=cache_conn,
+        )
 
     output = render_scan_result(result, args.format)
 
@@ -576,3 +681,23 @@ def _read_scan_result(path: str) -> ScanResult:
     with p.open(encoding="utf-8") as fh:
         payload = json.load(fh)
     return ScanResult.from_dict(payload)
+
+
+def _run_cache_command(args: argparse.Namespace) -> int:
+    cache_path = Path(args.cache_db) if args.cache_db else default_cache_path()
+    conn = open_cache(cache_path)
+    try:
+        if args.cache_action == "stats":
+            print(render_pretty_json({**cache_stats_for_version(conn), "cache_db": str(cache_path)}))
+            return 0
+        if args.cache_action == "clear":
+            removed = cache_clear_all(conn)
+            print(render_pretty_json({"cleared_rows": removed, "cache_db": str(cache_path)}))
+            return 0
+        if args.cache_action == "prune":
+            removed = cache_prune_other_versions(conn)
+            print(render_pretty_json({"pruned_old_version_rows": removed, "cache_db": str(cache_path)}))
+            return 0
+    finally:
+        conn.close()
+    return 1
