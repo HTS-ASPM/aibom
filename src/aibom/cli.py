@@ -29,7 +29,16 @@ from aibom.cache import (
 )
 from aibom.code_hosts import scan_bitbucket_repo, scan_gitlab_repo
 from aibom.diff import diff_scans as diff_scan_results, render_diff_html, render_diff_json
+from aibom.git_diff import GitNotAvailableError, scan_diff as scan_git_diff
 from aibom.models import ScanResult
+from aibom.pr_comment import (
+    format_aibom_comment,
+    format_diff_comment,
+    post_bitbucket_server_pr_comment,
+    post_gitea_pr_comment,
+    post_github_pr_comment,
+    post_gitlab_mr_comment,
+)
 from aibom.policy import load_policy_file
 from aibom.reporters import render_cyclonedx, render_json, render_markdown, render_pretty_json, render_sarif
 from aibom.sbom_unified import merge_sbom_aibom
@@ -247,6 +256,69 @@ def build_parser() -> argparse.ArgumentParser:
     scan_diff_parser.add_argument("--older-label", default="older", help="Label for the older scan in HTML")
     scan_diff_parser.add_argument("--newer-label", default="newer", help="Label for the newer scan in HTML")
 
+    scan_refs_parser = subparsers.add_parser(
+        "scan-refs",
+        help="Scan only files changed between two git refs (base..head)",
+    )
+    scan_refs_parser.add_argument("base", help="Base git ref (e.g. main)")
+    scan_refs_parser.add_argument("head", nargs="?", default="HEAD", help="Head git ref (default: HEAD)")
+    scan_refs_parser.add_argument("--repo", default=".", help="Path to the local git repo (default: cwd)")
+    scan_refs_parser.add_argument(
+        "--format",
+        choices=("json", "markdown", "sarif", "cyclonedx"),
+        default="json",
+        help="Output format",
+    )
+    scan_refs_parser.add_argument("--output", help="Optional output file path")
+    scan_refs_parser.add_argument("--policy", help="Optional policy file")
+    scan_refs_parser.add_argument("--tuning", help="Optional tuning file")
+    scan_refs_parser.add_argument(
+        "--max-file-size",
+        type=int,
+        default=512_000,
+        help="Maximum file size to scan in bytes",
+    )
+
+    pr_comment_parser = subparsers.add_parser(
+        "pr-comment",
+        help="Post an AiBOM scan or diff summary as a PR/MR comment",
+    )
+    pr_sub = pr_comment_parser.add_subparsers(dest="pr_provider", required=True)
+
+    def _pr_common(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--scan", help="Path to an aibom scan JSON to summarize (alternative to --diff)")
+        p.add_argument("--diff", help="Path to an aibom scan-diff JSON to summarize")
+        p.add_argument("--title", default="AiBOM scan", help="Comment title")
+
+    pr_github = pr_sub.add_parser("github", help="Post to a GitHub PR")
+    pr_github.add_argument("repo", help="owner/repo")
+    pr_github.add_argument("pr_number", type=int)
+    pr_github.add_argument("--token-env", default="GITHUB_TOKEN")
+    pr_github.add_argument("--api-base", default="https://api.github.com")
+    _pr_common(pr_github)
+
+    pr_gitlab = pr_sub.add_parser("gitlab", help="Post to a GitLab MR")
+    pr_gitlab.add_argument("project", help="numeric id OR url-encoded full path")
+    pr_gitlab.add_argument("mr_iid", type=int)
+    pr_gitlab.add_argument("--token-env", default="GITLAB_TOKEN")
+    pr_gitlab.add_argument("--base-url", default="https://gitlab.com")
+    _pr_common(pr_gitlab)
+
+    pr_bbs = pr_sub.add_parser("bitbucket-server", help="Post to a Bitbucket Server / DC pull request")
+    pr_bbs.add_argument("project")
+    pr_bbs.add_argument("repo")
+    pr_bbs.add_argument("pr_id", type=int)
+    pr_bbs.add_argument("--base-url", required=True)
+    pr_bbs.add_argument("--token-env", default="BITBUCKET_TOKEN")
+    _pr_common(pr_bbs)
+
+    pr_gitea = pr_sub.add_parser("gitea", help="Post to a Gitea PR")
+    pr_gitea.add_argument("repo", help="owner/repo")
+    pr_gitea.add_argument("pr_number", type=int)
+    pr_gitea.add_argument("--base-url", required=True)
+    pr_gitea.add_argument("--token-env", default="GITEA_TOKEN")
+    _pr_common(pr_gitea)
+
     cache_parser = subparsers.add_parser(
         "cache",
         help="Manage the per-file fingerprint cache used by --use-cache scans",
@@ -326,6 +398,7 @@ def main(argv: list[str] | None = None) -> int:
         "history", "show-scan", "diff-scans", "vex", "kev", "sign-bom",
         "report", "dashboard", "unified-bom",
         "asset-graph", "asset-graph-diff", "scan-diff",
+        "scan-refs", "pr-comment",
         "cache",
         "-h", "--help",
     }
@@ -376,6 +449,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "cache":
         return _run_cache_command(args)
+
+    if args.command == "scan-refs":
+        return _run_scan_refs_command(args)
+
+    if args.command == "pr-comment":
+        return _run_pr_comment_command(args)
 
     policy = load_policy_file(args.policy)
     tuning = load_tuning_file(args.tuning)
@@ -681,6 +760,96 @@ def _read_scan_result(path: str) -> ScanResult:
     with p.open(encoding="utf-8") as fh:
         payload = json.load(fh)
     return ScanResult.from_dict(payload)
+
+
+def _run_scan_refs_command(args: argparse.Namespace) -> int:
+    repo_root = Path(args.repo).resolve()
+    if not repo_root.exists():
+        print(f"error: repo path does not exist: {repo_root}", file=sys.stderr)
+        return 2
+    policy = load_policy_file(args.policy)
+    tuning = load_tuning_file(args.tuning)
+    try:
+        result = scan_git_diff(
+            repo_root,
+            args.base,
+            args.head,
+            max_file_size=args.max_file_size,
+            policy=policy,
+            tuning=tuning,
+        )
+    except GitNotAvailableError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 3
+    _emit(render_scan_result(result, args.format), args.output)
+    print(
+        render_pretty_json({
+            "ref_base": args.base, "ref_head": args.head,
+            "findings_in_diff": len(result.findings),
+        }),
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _run_pr_comment_command(args: argparse.Namespace) -> int:
+    try:
+        body = _build_pr_body(args)
+        if args.pr_provider == "github":
+            response = post_github_pr_comment(
+                args.repo, args.pr_number, body,
+                token_env=args.token_env, api_base=args.api_base,
+            )
+        elif args.pr_provider == "gitlab":
+            response = post_gitlab_mr_comment(
+                args.project, args.mr_iid, body,
+                token_env=args.token_env, base_url=args.base_url,
+            )
+        elif args.pr_provider == "bitbucket-server":
+            response = post_bitbucket_server_pr_comment(
+                args.project, args.repo, args.pr_id, body,
+                base_url=args.base_url, token_env=args.token_env,
+            )
+        elif args.pr_provider == "gitea":
+            response = post_gitea_pr_comment(
+                args.repo, args.pr_number, body,
+                base_url=args.base_url, token_env=args.token_env,
+            )
+        else:
+            print(f"error: unknown provider {args.pr_provider}", file=sys.stderr)
+            return 2
+    except Exception as exc:  # noqa: BLE001 — surface any transport error as exit 4
+        print(f"error: {exc}", file=sys.stderr)
+        return 4
+    print(render_pretty_json({"posted": True, "status": response.get("status")}))
+    return 0
+
+
+def _build_pr_body(args: argparse.Namespace) -> str:
+    if getattr(args, "diff", None):
+        diff_payload = json.loads(Path(args.diff).read_text(encoding="utf-8"))
+        from aibom.diff import FindingDiff
+        from aibom.models import Finding
+        # Reconstruct the dataclass-light shape format_diff_comment expects.
+        diff = FindingDiff(
+            added=[Finding.from_dict(f) for f in diff_payload.get("added", [])],
+            removed=[Finding.from_dict(f) for f in diff_payload.get("removed", [])],
+            severity_raised=[
+                (Finding.from_dict(item["older"]), Finding.from_dict(item["newer"]))
+                for item in diff_payload.get("severity_raised", [])
+            ],
+            severity_lowered=[
+                (Finding.from_dict(item["older"]), Finding.from_dict(item["newer"]))
+                for item in diff_payload.get("severity_lowered", [])
+            ],
+            unchanged_count=int(diff_payload.get("unchanged_count", 0)),
+        )
+        return format_diff_comment(diff, title=args.title)
+    if getattr(args, "scan", None):
+        scan_payload = json.loads(Path(args.scan).read_text(encoding="utf-8"))
+        result = ScanResult.from_dict(scan_payload)
+        return format_aibom_comment(result, title=args.title)
+    raise ValueError("either --scan or --diff is required for pr-comment")
 
 
 def _run_cache_command(args: argparse.Namespace) -> int:
