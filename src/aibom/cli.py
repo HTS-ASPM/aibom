@@ -793,8 +793,8 @@ def _run_scan_refs_command(args: argparse.Namespace) -> int:
 
 
 def _run_pr_comment_command(args: argparse.Namespace) -> int:
-    body = _build_pr_body(args)
     try:
+        body = _build_pr_body(args)
         if args.pr_provider == "github":
             response = post_github_pr_comment(
                 args.repo, args.pr_number, body,
