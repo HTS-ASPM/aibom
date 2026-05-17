@@ -1,0 +1,47 @@
+{
+  "name": "aibom-vscode",
+  "displayName": "AiBOM",
+  "description": "AI Bill of Materials scanner — inline findings in the editor",
+  "version": "0.0.1",
+  "publisher": "hts-aspm",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Linters", "Other"],
+  "activationEvents": [
+    "onLanguage:python",
+    "onLanguage:javascript",
+    "onLanguage:typescript",
+    "onLanguage:yaml",
+    "onLanguage:terraform"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "aibom.scanWorkspace",
+        "title": "AiBOM: Scan Workspace"
+      }
+    ],
+    "configuration": {
+      "title": "AiBOM",
+      "properties": {
+        "aibom.executable": {
+          "type": "string",
+          "default": "aibom",
+          "description": "Path to the aibom CLI"
+        },
+        "aibom.scanOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Re-run the scan whenever a tracked file is saved"
+        }
+      }
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HTS-ASPM/aibom"
+  }
+}
