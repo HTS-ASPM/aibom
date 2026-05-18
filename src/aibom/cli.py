@@ -46,6 +46,12 @@ from aibom.scanner import scan_path
 from aibom.signing import build_signature_manifest
 from aibom.store import diff_scans, get_scan, list_scans, save_scan
 from aibom.tuning import load_tuning_file
+from aibom.webhook import (
+    WebhookConfig,
+    build_check_run_body,
+    create_server,
+    post_check_run,
+)
 from aibom.vex import (
     cross_reference,
     cross_reference_kev,
@@ -319,6 +325,28 @@ def build_parser() -> argparse.ArgumentParser:
     pr_gitea.add_argument("--token-env", default="GITEA_TOKEN")
     _pr_common(pr_gitea)
 
+    webhook_parser = subparsers.add_parser(
+        "webhook",
+        help="Run a stdlib HTTP webhook receiver — auto-scan on push / PR / MR events",
+    )
+    webhook_parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
+    webhook_parser.add_argument("--port", type=int, default=8080, help="Bind port (default: 8080)")
+    webhook_parser.add_argument("--github-secret-env", help="Env var holding the GitHub webhook secret")
+    webhook_parser.add_argument("--gitlab-token-env", help="Env var holding the GitLab webhook token")
+    webhook_parser.add_argument("--gitea-secret-env", help="Env var holding the Gitea webhook secret")
+
+    check_run_parser = subparsers.add_parser(
+        "check-run",
+        help="POST a GitHub Check Run from an existing aibom scan JSON",
+    )
+    check_run_parser.add_argument("repo", help="owner/repo")
+    check_run_parser.add_argument("head_sha", help="Commit SHA the check ties to (head of the PR)")
+    check_run_parser.add_argument("--scan", required=True, help="Path to an aibom scan JSON file")
+    check_run_parser.add_argument("--name", default="aibom", help="Check Run name")
+    check_run_parser.add_argument("--details-url", help="External URL with full results")
+    check_run_parser.add_argument("--token-env", default="GITHUB_TOKEN")
+    check_run_parser.add_argument("--api-base", default="https://api.github.com")
+
     cache_parser = subparsers.add_parser(
         "cache",
         help="Manage the per-file fingerprint cache used by --use-cache scans",
@@ -399,6 +427,7 @@ def main(argv: list[str] | None = None) -> int:
         "report", "dashboard", "unified-bom",
         "asset-graph", "asset-graph-diff", "scan-diff",
         "scan-refs", "pr-comment",
+        "webhook", "check-run",
         "cache",
         "-h", "--help",
     }
@@ -455,6 +484,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "pr-comment":
         return _run_pr_comment_command(args)
+
+    if args.command == "webhook":
+        return _run_webhook_command(args)
+
+    if args.command == "check-run":
+        return _run_check_run_command(args)
 
     policy = load_policy_file(args.policy)
     tuning = load_tuning_file(args.tuning)
@@ -850,6 +885,45 @@ def _build_pr_body(args: argparse.Namespace) -> str:
         result = ScanResult.from_dict(scan_payload)
         return format_aibom_comment(result, title=args.title)
     raise ValueError("either --scan or --diff is required for pr-comment")
+
+
+def _run_webhook_command(args: argparse.Namespace) -> int:
+    config = WebhookConfig(
+        github_secret=os.environ.get(args.github_secret_env) if args.github_secret_env else None,
+        gitlab_token=os.environ.get(args.gitlab_token_env) if args.gitlab_token_env else None,
+        gitea_secret=os.environ.get(args.gitea_secret_env) if args.gitea_secret_env else None,
+    )
+    server = create_server(config, host=args.host, port=args.port)
+    print(f"aibom webhook receiver listening on http://{args.host}:{args.port}", file=sys.stderr)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
+def _run_check_run_command(args: argparse.Namespace) -> int:
+    scan_path_arg = Path(args.scan)
+    if not scan_path_arg.exists():
+        print(f"error: scan file not found: {scan_path_arg}", file=sys.stderr)
+        return 2
+    payload = json.loads(scan_path_arg.read_text(encoding="utf-8"))
+    result = ScanResult.from_dict(payload)
+    body = build_check_run_body(
+        result, name=args.name, head_sha=args.head_sha, details_url=args.details_url,
+    )
+    try:
+        response = post_check_run(
+            args.repo, body,
+            token_env=args.token_env, api_base=args.api_base,
+        )
+    except Exception as exc:  # noqa: BLE001 — surface any transport error as exit 4
+        print(f"error: {exc}", file=sys.stderr)
+        return 4
+    print(render_pretty_json({"posted": True, "status": response.get("status")}))
+    return 0
 
 
 def _run_cache_command(args: argparse.Namespace) -> int:
