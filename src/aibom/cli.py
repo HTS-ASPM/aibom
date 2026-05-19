@@ -86,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_arguments(gitlab_parser)
     gitlab_parser.add_argument(
         "project",
-        help="GitLab project — numeric id OR url-encoded full path (group%2Fproject)",
+        help="GitLab project — numeric id OR url-encoded full path (group%%2Fproject)",
     )
     gitlab_parser.add_argument("--ref", default="main", help="Git ref, branch, or tag")
     gitlab_parser.add_argument("--gitlab-base-url", default="https://gitlab.com", help="Self-hosted GitLab base URL")
