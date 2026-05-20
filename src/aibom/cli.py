@@ -33,6 +33,7 @@ from aibom.cache import (
 from aibom.code_hosts import scan_bitbucket_repo, scan_gitlab_repo
 from aibom.diff import diff_scans as diff_scan_results, render_diff_html, render_diff_json
 from aibom.git_diff import GitNotAvailableError, scan_diff as scan_git_diff
+from aibom.hts_aspm import build_aspm_payload, push_aspm_payload
 from aibom.models import ScanResult
 from aibom.pr_comment import (
     format_aibom_comment,
@@ -362,6 +363,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     demo_parser.add_argument("--output", help="Optional output file path")
 
+    push_parser = subparsers.add_parser(
+        "push",
+        help="Scan a target then POST the HTS-ASPM envelope to an ingest endpoint",
+    )
+    push_parser.add_argument("target", nargs="?", default=".", help="Path to scan (default: cwd)")
+    push_parser.add_argument("--aspm-url", required=True, help="HTS-ASPM ingest URL")
+    push_parser.add_argument("--project", help="Optional project identifier (sent as X-Aibom-Project)")
+    push_parser.add_argument(
+        "--token-env",
+        default="ASPM_TOKEN",
+        help="Env var containing the bearer token (default: ASPM_TOKEN)",
+    )
+    push_parser.add_argument("--kev-feed", help="Path to cached CISA KEV JSON")
+    push_parser.add_argument("--no-vex", action="store_true", help="Skip VEX cross-reference")
+    push_parser.add_argument("--no-kev", action="store_true", help="Skip KEV cross-reference")
+    push_parser.add_argument("--signer", help="Include a signature_manifest with this signer identity")
+    push_parser.add_argument("--key-ref", help="cosign key reference for the signature manifest")
+    push_parser.add_argument("--policy", help="Optional policy file")
+    push_parser.add_argument("--tuning", help="Optional tuning file")
+    push_parser.add_argument(
+        "--max-file-size",
+        type=int,
+        default=512_000,
+        help="Maximum file size to scan in bytes",
+    )
+
     cache_parser = subparsers.add_parser(
         "cache",
         help="Manage the per-file fingerprint cache used by --use-cache scans",
@@ -443,7 +470,7 @@ def main(argv: list[str] | None = None) -> int:
         "asset-graph", "asset-graph-diff", "scan-diff",
         "scan-refs", "pr-comment",
         "webhook", "check-run",
-        "cache", "demo",
+        "cache", "demo", "push",
         "-h", "--help",
     }
     if not argv or argv[0] not in known_commands:
@@ -508,6 +535,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "check-run":
         return _run_check_run_command(args)
+
+    if args.command == "push":
+        return _run_push_command(args)
 
     policy = load_policy_file(args.policy)
     tuning = load_tuning_file(args.tuning)
@@ -973,6 +1003,56 @@ def _run_demo_command(args: argparse.Namespace) -> int:
         }),
         file=sys.stderr,
     )
+    return 0
+
+
+# Module-level seam so tests can inject a fake transport without
+# monkey-patching deeper modules. None means "use real urllib".
+_PUSH_REQUESTER = None
+
+
+def _run_push_command(args: argparse.Namespace) -> int:
+    from aibom.aspm_push import PushError
+
+    target = Path(args.target).resolve()
+    if not target.exists():
+        print(f"error: target does not exist: {target}", file=sys.stderr)
+        return 2
+    policy = load_policy_file(args.policy)
+    tuning = load_tuning_file(args.tuning)
+    result = scan_path(
+        target,
+        max_file_size=args.max_file_size,
+        policy=policy,
+        tuning=tuning,
+    )
+    kev_feed = Path(args.kev_feed) if args.kev_feed else None
+    payload = build_aspm_payload(
+        result,
+        include_vex=not args.no_vex,
+        include_kev=not args.no_kev,
+        kev_feed=kev_feed,
+        signer=args.signer,
+        key_ref=args.key_ref,
+    )
+    try:
+        response = push_aspm_payload(
+            args.aspm_url,
+            payload,
+            token_env=args.token_env,
+            project=args.project,
+            requester=_PUSH_REQUESTER,
+        )
+    except PushError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 4
+    print(render_pretty_json({
+        "posted": True,
+        "status": response.status,
+        "scan_id": payload["scan_id"],
+        "schema_version": payload["schema_version"],
+        "findings_total": payload["findings_summary"]["total"],
+    }))
     return 0
 
 
