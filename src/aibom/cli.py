@@ -56,12 +56,16 @@ from aibom.webhook import (
     create_server,
     post_check_run,
 )
+from aibom.runtime import load_otel_spans, reconcile_runtime_with_bom
+from aibom.serve import ServeConfig, create_server as create_dashboard_server
 from aibom.vex import (
+    KevRefreshError,
     cross_reference,
     cross_reference_kev,
     load_feed,
     load_kev_feed,
     merge_vex_into_bom,
+    refresh_kev_feed,
 )
 
 
@@ -389,6 +393,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum file size to scan in bytes",
     )
 
+    serve_parser = subparsers.add_parser(
+        "serve",
+        help="Run the stdlib HTTP dashboard server (dashboard / BOM / asset-graph / reports)",
+    )
+    serve_parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
+    serve_parser.add_argument("--port", type=int, default=8088, help="Bind port (default: 8088)")
+    serve_parser.add_argument(
+        "--allowed-root",
+        help="Path-traversal sandbox — `target` query-string values must resolve under this dir (default: cwd)",
+    )
+
+    kev_refresh_parser = subparsers.add_parser(
+        "kev-refresh",
+        help="Fetch the CISA KEV catalog to a local cache (atomic write)",
+    )
+    kev_refresh_parser.add_argument(
+        "--destination",
+        help="Cache file path (default: ~/.aibom/kev.json)",
+    )
+    kev_refresh_parser.add_argument(
+        "--source-url",
+        help="Override the CISA feed URL (e.g. for air-gapped mirrors)",
+    )
+    kev_refresh_parser.add_argument(
+        "--no-network",
+        action="store_true",
+        help="Fail instead of touching the network unless a custom --source-url is local",
+    )
+
+    reconcile_parser = subparsers.add_parser(
+        "reconcile",
+        help="Reconcile an OTel-GenAI trace dump with a CycloneDX BOM (shadow AI + dead inventory)",
+    )
+    reconcile_parser.add_argument("bom_path", help="Path to a CycloneDX 1.6 JSON BOM")
+    reconcile_parser.add_argument("traces_path", help="Path to an OTel-GenAI spans JSON file")
+    reconcile_parser.add_argument("--output", help="Write reconciliation JSON to this path (default: stdout)")
+
     cache_parser = subparsers.add_parser(
         "cache",
         help="Manage the per-file fingerprint cache used by --use-cache scans",
@@ -471,6 +512,7 @@ def main(argv: list[str] | None = None) -> int:
         "scan-refs", "pr-comment",
         "webhook", "check-run",
         "cache", "demo", "push",
+        "serve", "kev-refresh", "reconcile",
         "-h", "--help",
     }
     if not argv or argv[0] not in known_commands:
@@ -538,6 +580,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "push":
         return _run_push_command(args)
+
+    if args.command == "serve":
+        return _run_serve_command(args)
+
+    if args.command == "kev-refresh":
+        return _run_kev_refresh_command(args)
+
+    if args.command == "reconcile":
+        return _run_reconcile_command(args)
 
     policy = load_policy_file(args.policy)
     tuning = load_tuning_file(args.tuning)
@@ -1053,6 +1104,83 @@ def _run_push_command(args: argparse.Namespace) -> int:
         "schema_version": payload["schema_version"],
         "findings_total": payload["findings_summary"]["total"],
     }))
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# serve / kev-refresh / reconcile handlers (P16)
+# --------------------------------------------------------------------------- #
+
+def _run_serve_command(args: argparse.Namespace) -> int:
+    root = Path(args.allowed_root).expanduser().resolve() if args.allowed_root else Path.cwd().resolve()
+    if not root.exists():
+        print(f"error: allowed-root does not exist: {root}", file=sys.stderr)
+        return 2
+    config = ServeConfig(allowed_root=root)
+    server = create_dashboard_server(config, host=args.host, port=args.port)
+    print(
+        f"aibom dashboard server listening on http://{args.host}:{args.port} "
+        f"(allowed-root={root})",
+        file=sys.stderr,
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
+def _run_kev_refresh_command(args: argparse.Namespace) -> int:
+    destination = Path(args.destination).expanduser() if args.destination else None
+    source_url = args.source_url
+    if args.no_network and not source_url:
+        print(
+            "error: --no-network requires --source-url (or a pre-populated local cache); "
+            "refusing to call the CISA endpoint",
+            file=sys.stderr,
+        )
+        return 3
+    if source_url and source_url.startswith("file://"):
+        # Allow `file://` URLs without going through urllib for air-gapped fixtures.
+        local = Path(source_url[len("file://"):])
+        def _file_fetcher(_url: str) -> bytes:
+            return local.read_bytes()
+        fetcher = _file_fetcher
+    else:
+        fetcher = None
+    try:
+        summary = refresh_kev_feed(destination, source_url=source_url, fetcher=fetcher)
+    except KevRefreshError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 4
+    print(render_pretty_json(summary))
+    return 0
+
+
+def _run_reconcile_command(args: argparse.Namespace) -> int:
+    bom_path = Path(args.bom_path)
+    traces_path = Path(args.traces_path)
+    if not bom_path.exists():
+        print(f"error: BOM not found: {bom_path}", file=sys.stderr)
+        return 2
+    if not traces_path.exists():
+        print(f"error: traces not found: {traces_path}", file=sys.stderr)
+        return 2
+    bom = json.loads(bom_path.read_text(encoding="utf-8"))
+    spans = load_otel_spans(traces_path)
+    report = reconcile_runtime_with_bom(bom, spans)
+    _emit(json.dumps(report, indent=2), args.output)
+    print(
+        render_pretty_json({
+            "observed_models": report["summary"]["observed_model_count"],
+            "shadow_models": report["summary"]["shadow_model_count"],
+            "dead_inventory": report["summary"]["dead_inventory_count"],
+            "matches": report["summary"]["match_count"],
+        }),
+        file=sys.stderr,
+    )
     return 0
 
 

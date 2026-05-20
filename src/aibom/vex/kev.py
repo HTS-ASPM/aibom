@@ -40,11 +40,22 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from aibom.models import Finding, MatchEvidence
+
+
+# Official CISA KEV catalog feed.
+CISA_KEV_FEED_URL = (
+    "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+)
+
+# Default on-disk cache for the KEV catalog when no explicit path is given.
+DEFAULT_KEV_CACHE_PATH = Path.home() / ".aibom" / "kev.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,8 +70,14 @@ class KevEntry:
 
 
 def load_kev_feed(path: Path | None = None) -> dict[str, KevEntry]:
-    """Load + index the KEV catalog by upper-cased CVE id. Returns {} when no file is available."""
-    candidate = path or _env_feed_path()
+    """Load + index the KEV catalog by upper-cased CVE id. Returns {} when no file is available.
+
+    Resolution order:
+      1. explicit `path` argument
+      2. AIBOM_KEV_FEED env var
+      3. ``~/.aibom/kev.json`` if it exists (populated by `aibom kev-refresh`)
+    """
+    candidate = path or _env_feed_path() or _default_cache_if_exists()
     if candidate is None or not candidate.exists():
         return {}
     try:
@@ -164,3 +181,70 @@ def cross_reference_kev(
 def _env_feed_path() -> Path | None:
     val = os.environ.get("AIBOM_KEV_FEED")
     return Path(val) if val else None
+
+
+def _default_cache_if_exists() -> Path | None:
+    return DEFAULT_KEV_CACHE_PATH if DEFAULT_KEV_CACHE_PATH.exists() else None
+
+
+# --------------------------------------------------------------------------- #
+# Catalog auto-refresh (P16)
+# --------------------------------------------------------------------------- #
+
+class KevRefreshError(RuntimeError):
+    """Raised when the KEV catalog cannot be fetched or written."""
+
+
+def _default_fetcher(url: str) -> bytes:
+    """Minimal urllib-backed HTTPS GET. Pulled out so tests can inject."""
+    request = urllib.request.Request(url, headers={"User-Agent": "aibom-kev-refresh/1"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as resp:  # noqa: S310
+            return resp.read()
+    except urllib.error.URLError as exc:  # pragma: no cover — network path
+        raise KevRefreshError(f"failed to fetch KEV feed: {exc}") from exc
+
+
+def refresh_kev_feed(
+    destination: Path | str | None = None,
+    *,
+    source_url: str | None = None,
+    fetcher: Callable[[str], bytes] | None = None,
+) -> dict[str, Any]:
+    """Fetch the CISA KEV catalog and write it atomically to ``destination``.
+
+    Returns a small summary dict::
+
+        {"vulnerabilities": N, "catalog_version": "...", "destination": "/path"}
+
+    The write is atomic — a tmp file is written + renamed; if the
+    fetcher raises, no destination file is touched.
+    """
+    dest = Path(destination) if destination is not None else DEFAULT_KEV_CACHE_PATH
+    url = source_url or CISA_KEV_FEED_URL
+    fetch = fetcher or _default_fetcher
+
+    raw = fetch(url)
+    if not isinstance(raw, (bytes, bytearray)):
+        raise KevRefreshError("fetcher must return bytes")
+    try:
+        decoded = raw.decode("utf-8")
+        payload = json.loads(decoded)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise KevRefreshError(f"KEV feed is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict) or "vulnerabilities" not in payload:
+        raise KevRefreshError("KEV feed is missing the 'vulnerabilities' array")
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    tmp.write_bytes(raw)
+    tmp.replace(dest)
+
+    vulns = payload.get("vulnerabilities") or []
+    return {
+        "vulnerabilities": len(vulns),
+        "catalog_version": payload.get("catalogVersion") or payload.get("catalog_version"),
+        "date_released": payload.get("dateReleased") or payload.get("date_released"),
+        "destination": str(dest),
+        "source_url": url,
+    }

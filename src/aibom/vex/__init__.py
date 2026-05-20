@@ -14,14 +14,21 @@ from aibom.vex.feed import (
     load_feed,
 )
 from aibom.vex.kev import (
+    CISA_KEV_FEED_URL,
+    DEFAULT_KEV_CACHE_PATH,
     KevEntry,
+    KevRefreshError,
     cross_reference_kev,
     load_kev_feed,
+    refresh_kev_feed,
 )
 
 __all__ = [
+    "CISA_KEV_FEED_URL",
+    "DEFAULT_KEV_CACHE_PATH",
     "DEFAULT_VEX_FEED",
     "KevEntry",
+    "KevRefreshError",
     "VexEntry",
     "cross_reference",
     "cross_reference_kev",
@@ -29,4 +36,5 @@ __all__ = [
     "load_feed",
     "load_kev_feed",
     "merge_vex_into_bom",
+    "refresh_kev_feed",
 ]
