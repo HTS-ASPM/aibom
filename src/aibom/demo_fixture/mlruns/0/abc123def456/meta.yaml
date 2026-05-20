@@ -1,0 +1,6 @@
+artifact_uri: ./mlruns/0/abc123def456/artifacts
+experiment_id: '0'
+lifecycle_stage: active
+run_id: abc123def456
+run_name: aibom-demo-run
+status: 3

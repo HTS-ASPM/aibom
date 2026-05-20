@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import StringIO
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -38,6 +39,23 @@ class CliTestCase(unittest.TestCase):
             exit_code = main(["scan-gcp", "dev", "--project-id", "proj-123", "--format", "json"])
         self.assertEqual(exit_code, 0)
         mock_scan.assert_called_once()
+
+    def test_demo_command_emits_provider_iac_and_ci_evidence(self) -> None:
+        with patch("sys.stdout", new_callable=StringIO) as stdout, patch("sys.stderr", new_callable=StringIO):
+            exit_code = main(["demo", "--format", "json"])
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        findings = payload["findings"]
+        self.assertTrue(findings, "demo scan must surface at least one finding")
+        categories = {f["category"] for f in findings}
+        source_kinds = {f["source_kind"] for f in findings}
+        # Provider evidence — either a `provider.*` rule or an IaC AI resource (also category=provider).
+        self.assertIn("provider", categories, f"expected provider category, got {sorted(categories)}")
+        # IaC evidence — Terraform / Helm-K8s parsers tag findings with source_kind=iac.
+        self.assertIn("iac", source_kinds, f"expected iac source_kind, got {sorted(source_kinds)}")
+        # CI evidence — GitHub Actions + MLflow collectors tag source_kind=ci, category=formulation.
+        self.assertIn("ci", source_kinds, f"expected ci source_kind, got {sorted(source_kinds)}")
+        self.assertIn("formulation", categories, f"expected formulation category, got {sorted(categories)}")
 
     def test_history_commands_work_with_temp_db(self) -> None:
         with TemporaryDirectory(prefix="aibom-cli-") as temp_dir:

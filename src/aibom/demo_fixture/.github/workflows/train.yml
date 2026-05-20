@@ -1,0 +1,16 @@
+name: train
+
+on:
+  workflow_dispatch:
+
+jobs:
+  finetune:
+    runs-on: [self-hosted, gpu, a100]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Train
+        run: |
+          accelerate launch train.py --epochs 3
+      - name: Publish model
+        run: |
+          huggingface-cli upload aibom-demo/model ./out

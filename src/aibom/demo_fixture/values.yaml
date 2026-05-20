@@ -1,0 +1,9 @@
+# Helm values for the vLLM serving deployment.
+serving:
+  image: vllm/vllm-openai:v0.6.1
+  args:
+    - "--model"
+    - "meta-llama/Llama-3-8B"
+  resources:
+    limits:
+      nvidia.com/gpu: 1
