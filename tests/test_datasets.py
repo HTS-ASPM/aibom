@@ -73,5 +73,48 @@ class DatasetCdxIntegrationTests(unittest.TestCase):
             )
 
 
+class DatasetIsolationDemotionTests(unittest.TestCase):
+    """Dataset rules emit info-level findings in isolation, but preserve
+    their original severity when the same file also touches an LLM
+    provider (real data-flow risk)."""
+
+    def test_dataset_only_file_demoted_to_info(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "load.py").write_text(
+                "path = 's3://mybucket/train.parquet'\n",
+                encoding="utf-8",
+            )
+            result = scan_path(root)
+            dataset_findings = [f for f in result.findings if f.rule_id.startswith("dataset.")]
+            self.assertTrue(dataset_findings, "expected at least one dataset finding")
+            for finding in dataset_findings:
+                self.assertEqual(
+                    finding.severity, "info",
+                    f"{finding.rule_id} on {finding.path} should be demoted to info",
+                )
+                # The original severity should be recorded for audit when it was demoted.
+                self.assertEqual(finding.metadata.get("original_severity"), "medium")
+
+    def test_dataset_plus_provider_preserves_severity(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "train.py").write_text(
+                "import openai\n"
+                "path = 's3://mybucket/train.parquet'\n"
+                "client = openai.OpenAI()\n",
+                encoding="utf-8",
+            )
+            result = scan_path(root)
+            s3_findings = [f for f in result.findings if f.rule_id == "dataset.s3.uri"]
+            self.assertTrue(s3_findings, "expected an S3 dataset finding")
+            for finding in s3_findings:
+                self.assertEqual(
+                    finding.severity, "medium",
+                    "dataset finding in a file with a provider should keep original severity",
+                )
+                self.assertNotIn("original_severity", finding.metadata)
+
+
 if __name__ == "__main__":
     unittest.main()

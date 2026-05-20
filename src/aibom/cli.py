@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+from importlib import resources
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
+import tempfile
 
 from aibom.asset_graph import (
     build_asset_graph,
@@ -347,6 +350,18 @@ def build_parser() -> argparse.ArgumentParser:
     check_run_parser.add_argument("--token-env", default="GITHUB_TOKEN")
     check_run_parser.add_argument("--api-base", default="https://api.github.com")
 
+    demo_parser = subparsers.add_parser(
+        "demo",
+        help="Scan a built-in tiny fixture — covers provider / IaC / CI / dataset / MLflow layers",
+    )
+    demo_parser.add_argument(
+        "--format",
+        choices=("json", "markdown", "cyclonedx"),
+        default="json",
+        help="Output format (default: json)",
+    )
+    demo_parser.add_argument("--output", help="Optional output file path")
+
     cache_parser = subparsers.add_parser(
         "cache",
         help="Manage the per-file fingerprint cache used by --use-cache scans",
@@ -428,7 +443,7 @@ def main(argv: list[str] | None = None) -> int:
         "asset-graph", "asset-graph-diff", "scan-diff",
         "scan-refs", "pr-comment",
         "webhook", "check-run",
-        "cache",
+        "cache", "demo",
         "-h", "--help",
     }
     if not argv or argv[0] not in known_commands:
@@ -478,6 +493,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "cache":
         return _run_cache_command(args)
+
+    if args.command == "demo":
+        return _run_demo_command(args)
 
     if args.command == "scan-refs":
         return _run_scan_refs_command(args)
@@ -923,6 +941,38 @@ def _run_check_run_command(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 4
     print(render_pretty_json({"posted": True, "status": response.get("status")}))
+    return 0
+
+
+def _run_demo_command(args: argparse.Namespace) -> int:
+    """Scan the built-in `aibom.demo_fixture` package and print a summary.
+
+    The fixture lives inside the wheel as package data, so we copy it
+    into a temp directory (the scanner expects a real filesystem path
+    for IaC + MLflow + GHA walks). ``importlib.resources.as_file``
+    handles both source checkouts and installed wheels uniformly.
+    """
+    fixture = resources.files("aibom.demo_fixture")
+    with resources.as_file(fixture) as fixture_path:
+        with tempfile.TemporaryDirectory(prefix="aibom-demo-") as tmp:
+            target = Path(tmp) / "fixture"
+            shutil.copytree(fixture_path, target, ignore=shutil.ignore_patterns("__pycache__", "__init__.py"))
+            result = scan_path(target)
+    output = render_scan_result(result, args.format)
+    if args.output:
+        Path(args.output).write_text(output, encoding="utf-8")
+    else:
+        print(output)
+    categories = sorted({finding.category for finding in result.findings})
+    source_kinds = sorted({finding.source_kind for finding in result.findings})
+    print(
+        render_pretty_json({
+            "demo_findings": len(result.findings),
+            "categories": categories,
+            "source_kinds": source_kinds,
+        }),
+        file=sys.stderr,
+    )
     return 0
 
 

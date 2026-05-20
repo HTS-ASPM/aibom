@@ -380,12 +380,63 @@ def scan_path(
         findings.extend(collect_github_actions(root))
         findings.extend(collect_mlflow_runs(root))
 
+    findings = demote_isolated_dataset_findings(findings)
+
     for finding in findings:
         annotate_finding_metadata(finding.rule_id, finding.metadata)
 
     findings = apply_tuning(dedupe_findings(findings), tuning or {})
     findings = apply_policy(findings, policy or {})
     return ScanResult(root=str(root), findings=findings, stats=stats)
+
+
+def demote_isolated_dataset_findings(findings: list[Finding]) -> list[Finding]:
+    """Demote `dataset.*` findings to `info` severity unless the same
+    file (rel_path) also produced a `provider.*` finding.
+
+    Dataset rules are noisy in isolation (one S3 URI in a doc snippet
+    isn't worth medium severity), but become signal-bearing when the
+    same file also touches a provider — e.g. a training script that
+    pulls from S3 and calls OpenAI is a real data-flow risk. The
+    original severity is preserved under ``metadata['original_severity']``
+    for audit.
+    """
+    provider_paths = {
+        finding.path
+        for finding in findings
+        if finding.category == "provider"
+    }
+    demoted: list[Finding] = []
+    for finding in findings:
+        if not finding.rule_id.startswith("dataset."):
+            demoted.append(finding)
+            continue
+        if finding.path in provider_paths:
+            demoted.append(finding)
+            continue
+        if finding.severity == "info":
+            demoted.append(finding)
+            continue
+        new_metadata = dict(finding.metadata)
+        new_metadata.setdefault("original_severity", finding.severity)
+        demoted.append(
+            Finding(
+                finding_id=finding.finding_id,
+                rule_id=finding.rule_id,
+                category=finding.category,
+                name=finding.name,
+                severity="info",
+                confidence=finding.confidence,
+                path=finding.path,
+                detector=finding.detector,
+                entity_type=finding.entity_type,
+                source_kind=finding.source_kind,
+                summary=finding.summary,
+                evidence=list(finding.evidence),
+                metadata=new_metadata,
+            )
+        )
+    return demoted
 
 
 def iter_files(root: Path, exclude_patterns: list[str]):

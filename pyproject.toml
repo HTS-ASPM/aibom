@@ -4,34 +4,85 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aibom"
-version = "0.1.0"
-description = "AI Bill of Materials scanner for repositories and configuration artifacts"
+version = "0.2.0"
+description = "AI Bill of Materials scanner for code, cloud, IaC, CI, and Hugging Face — emits CycloneDX 1.6 ML-BOM, SARIF, and EU AI Act / NIST AI RMF / ISO 42001 compliance reports."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
   { name = "HTS Consulting" }
 ]
 license = { text = "Apache-2.0" }
-keywords = ["aibom", "sbom", "cyclonedx", "ml-bom", "ai-security", "aspm", "owasp", "llm"]
+keywords = [
+  "aibom",
+  "ai-bom",
+  "ai-bill-of-materials",
+  "sbom",
+  "cyclonedx",
+  "ml-bom",
+  "ai-security",
+  "ai-governance",
+  "aspm",
+  "owasp-llm-top-10",
+  "owasp-mcp-top-10",
+  "mitre-atlas",
+  "nist-ai-rmf",
+  "iso-42001",
+  "eu-ai-act",
+  "annex-iv",
+  "cisa-kev",
+  "sigstore",
+  "vex",
+  "llm",
+  "huggingface",
+  "mlflow",
+  "terraform",
+  "helm",
+]
 classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Information Technology",
+  "Intended Audience :: System Administrators",
   "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Security",
-  "Development Status :: 3 :: Alpha",
+  "Topic :: Software Development :: Quality Assurance",
+  "Topic :: System :: Monitoring",
+  "Topic :: System :: Software Distribution",
+  "Typing :: Typed",
 ]
 dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/HTS-ASPM/aibom"
-Repository = "https://github.com/HTS-ASPM/aibom"
+Documentation = "https://github.com/HTS-ASPM/aibom#readme"
 Issues = "https://github.com/HTS-ASPM/aibom/issues"
+Repository = "https://github.com/HTS-ASPM/aibom"
 
 [project.scripts]
 aibom = "aibom.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"aibom.demo_fixture" = [
+  "*",
+  "**/*",
+  ".github/workflows/*.yml",
+  "mlruns/**/*",
+  "mlruns/**/meta.yaml",
+  "mlruns/**/params/*",
+  "mlruns/**/metrics/*",
+  "mlruns/**/tags/*",
+]
